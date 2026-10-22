@@ -1,0 +1,6 @@
+npm run dev:all de chay full server 
+cd C:\Users\Admin\Downloads\ROAM\pacific-ui
+npm start 
+ 
+ cd C:\Users\Admin\Downloads\ROAM\pacific-backend
+npm run dev 5000
