@@ -1,0 +1,371 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const crypto = require('crypto');
+
+const Tour = require('../models/Tour');
+const Booking = require('../models/Booking');
+
+const router = express.Router();
+
+const TourDetail =
+    mongoose.models.TourDetail ||
+    mongoose.model(
+        'TourDetail',
+        new mongoose.Schema(
+            {},
+            {
+                strict: false,
+                timestamps: true,
+            }
+        ),
+        'tourdetails'
+    );
+
+const getTourId = (detail) => {
+    const value =
+        detail?.tourId ??
+        detail?.tour_id ??
+        detail?.tour?._id ??
+        detail?.tour?.id ??
+        detail?.tour;
+
+    if (value && typeof value === 'object') {
+        return String(value._id ?? value.id ?? '');
+    }
+
+    return value ? String(value) : '';
+};
+
+const buildVnpQuery = (params) =>
+    Object.keys(params)
+        .sort()
+        .map(
+            (key) =>
+                `${encodeURIComponent(key)}=${encodeURIComponent(
+                    String(params[key])
+                ).replace(/%20/g, '+')}`
+        )
+        .join('&');
+
+const formatVnpDate = (date) => {
+    const vnDate = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+    const pad = (value) => String(value).padStart(2, '0');
+
+    return (
+        vnDate.getUTCFullYear() +
+        pad(vnDate.getUTCMonth() + 1) +
+        pad(vnDate.getUTCDate()) +
+        pad(vnDate.getUTCHours()) +
+        pad(vnDate.getUTCMinutes()) +
+        pad(vnDate.getUTCSeconds())
+    );
+};
+
+const isClosedStatus = (status) =>
+    [
+        'CLOSED',
+        'CANCELLED',
+        'CANCELED',
+        'INACTIVE',
+        'DELETED',
+        'FULL',
+        'SOLD_OUT',
+    ].includes(String(status || '').toUpperCase());
+
+/* POST /api/bookings/tour/:id */
+router.post('/tour/:id', async (req, res) => {
+    try {
+        const detailId = req.params.id;
+        const body = req.body || {};
+
+        if (!mongoose.Types.ObjectId.isValid(detailId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'ID lịch khởi hành không hợp lệ.',
+            });
+        }
+
+        const detail = await TourDetail.findById(detailId).lean();
+
+        if (!detail) {
+            return res.status(404).json({
+                success: false,
+                message: 'Không tìm thấy lịch khởi hành.',
+            });
+        }
+
+        if (isClosedStatus(detail.status)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Lịch khởi hành đã đóng.',
+            });
+        }
+
+        const attendees = Array.isArray(body.bookingDetails)
+            ? body.bookingDetails
+            : [];
+
+        if (attendees.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Vui lòng nhập thông tin người tham gia.',
+            });
+        }
+
+        const totalAmount = Number(body.totalAmount);
+
+        if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Tổng tiền không hợp lệ.',
+            });
+        }
+
+        const tourId = getTourId(detail);
+        let tour = null;
+
+        if (mongoose.Types.ObjectId.isValid(tourId)) {
+            tour = await Tour.findById(tourId).lean();
+        }
+
+        const bookingNo =
+            `ROAM-${Date.now()}-` +
+            crypto.randomBytes(3).toString('hex').toUpperCase();
+
+        const booking = await Booking.create({
+            bookingNo,
+            tourDetailId: detail._id,
+            tourId,
+            tourTitle:
+                tour?.title ||
+                detail.title ||
+                detail.name ||
+                'Tour du lịch',
+
+            bookerFullName: String(body.bookerFullName || ''),
+            bookerEmail: String(body.bookerEmail || ''),
+            bookerPhoneNumber: String(body.bookerPhoneNumber || ''),
+            bookerAddress: String(body.bookerAddress || ''),
+
+            bookingDetails: attendees,
+            paymentMethod: 'VNPAY',
+            paymentStatus: 'PENDING',
+            status: 'PENDING_PAYMENT',
+            totalAmount,
+
+            voucherCode: body.voucherCode || null,
+            specialRequests: String(body.specialRequests || ''),
+        });
+
+        return res.status(201).json({
+            success: true,
+            message: 'Đã tạo booking, đang chờ thanh toán.',
+            data: {
+                _id: booking._id,
+                id: booking._id,
+                bookingNo: booking.bookingNo,
+                totalAmount: booking.totalAmount,
+                status: booking.status,
+                paymentStatus: booking.paymentStatus,
+                tourTitle: booking.tourTitle,
+                tourDetailId: booking.tourDetailId,
+            },
+        });
+    } catch (error) {
+        console.error('Lỗi tạo booking:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Không thể tạo booking.',
+        });
+    }
+});
+
+/* GET /api/bookings/checkout */
+router.get('/checkout', async (req, res) => {
+    try {
+        const bookingNo = String(req.query.orderInfo || '').trim();
+
+        if (!bookingNo) {
+            return res.status(400).json({
+                success: false,
+                message: 'Thiếu mã booking.',
+            });
+        }
+
+        const booking = await Booking.findOne({ bookingNo }).lean();
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: 'Không tìm thấy booking cần thanh toán.',
+            });
+        }
+
+        if (booking.paymentStatus === 'PAID') {
+            return res.status(409).json({
+                success: false,
+                message: 'Booking này đã được thanh toán.',
+            });
+        }
+
+        const tmnCode = process.env.VNP_TMN_CODE;
+        const hashSecret = process.env.VNP_HASH_SECRET;
+        const returnUrl = process.env.VNP_RETURN_URL;
+
+        if (!tmnCode || !hashSecret || !returnUrl) {
+            return res.status(503).json({
+                success: false,
+                message: 'Chưa cấu hình VNPay trong file .env.',
+            });
+        }
+
+        const amount = Number(booking.totalAmount);
+
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Số tiền thanh toán không hợp lệ.',
+            });
+        }
+
+        const params = {
+            vnp_Version: '2.1.0',
+            vnp_Command: 'pay',
+            vnp_TmnCode: tmnCode,
+            vnp_Amount: String(Math.round(amount * 100)),
+            vnp_CurrCode: 'VND',
+            vnp_TxnRef: booking.bookingNo,
+            vnp_OrderInfo: `Thanh toan ${booking.bookingNo}`,
+            vnp_OrderType: 'other',
+            vnp_Locale: 'vn',
+            vnp_ReturnUrl: returnUrl,
+            vnp_IpAddr: String(
+                req.headers['x-forwarded-for']?.split(',')[0] ||
+                    req.socket.remoteAddress ||
+                    '127.0.0.1'
+            ).replace('::ffff:', ''),
+            vnp_CreateDate: formatVnpDate(new Date()),
+            vnp_ExpireDate: formatVnpDate(
+                new Date(Date.now() + 15 * 60 * 1000)
+            ),
+        };
+
+        const signedData = buildVnpQuery(params);
+
+        const signature = crypto
+            .createHmac('sha512', hashSecret)
+            .update(signedData, 'utf8')
+            .digest('hex');
+
+        const gateway =
+            process.env.VNP_URL ||
+            'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html';
+
+        const paymentUrl =
+            `${gateway}?${signedData}` +
+            `&vnp_SecureHash=${signature}`;
+
+        return res.status(200).json(paymentUrl);
+    } catch (error) {
+        console.error('Lỗi tạo URL thanh toán:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Không thể tạo URL thanh toán.',
+        });
+    }
+});
+
+/* GET /api/bookings/vnpay-payment-return */
+router.get('/vnpay-payment-return', async (req, res) => {
+    try {
+        const hashSecret = process.env.VNP_HASH_SECRET;
+
+        if (!hashSecret) {
+            return res.status(503).json({
+                success: false,
+                message: 'Chưa cấu hình khóa xác thực VNPay.',
+            });
+        }
+
+        const params = { ...req.query };
+        const receivedHash = String(
+            params.vnp_SecureHash || ''
+        ).toLowerCase();
+
+        delete params.vnp_SecureHash;
+        delete params.vnp_SecureHashType;
+
+        const normalized = {};
+
+        for (const [key, value] of Object.entries(params)) {
+            normalized[key] = Array.isArray(value)
+                ? String(value[value.length - 1] ?? '')
+                : String(value ?? '');
+        }
+
+        const signedData = buildVnpQuery(normalized);
+
+        const expectedHash = crypto
+            .createHmac('sha512', hashSecret)
+            .update(signedData, 'utf8')
+            .digest('hex')
+            .toLowerCase();
+
+        const a = Buffer.from(receivedHash, 'utf8');
+        const b = Buffer.from(expectedHash, 'utf8');
+
+        const signatureValid =
+            a.length > 0 &&
+            a.length === b.length &&
+            crypto.timingSafeEqual(a, b);
+
+        if (!signatureValid) {
+            return res.status(400).json({
+                success: false,
+                message: 'Chữ ký VNPay không hợp lệ.',
+            });
+        }
+
+        const bookingNo = normalized.vnp_TxnRef || '';
+        const booking = await Booking.findOne({ bookingNo });
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: 'Không tìm thấy booking.',
+            });
+        }
+
+        const paid =
+            normalized.vnp_ResponseCode === '00' &&
+            normalized.vnp_TransactionStatus === '00';
+
+        booking.paymentStatus = paid ? 'PAID' : 'FAILED';
+        booking.status = paid ? 'CONFIRMED' : 'PAYMENT_FAILED';
+
+        await booking.save();
+
+        return res.status(200).json({
+            success: true,
+            message: paid
+                ? 'Thanh toán thành công.'
+                : 'Thanh toán chưa thành công.',
+            data: {
+                bookingNo: booking.bookingNo,
+                paymentStatus: booking.paymentStatus,
+                status: booking.status,
+            },
+        });
+    } catch (error) {
+        console.error('Lỗi xử lý callback VNPay:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Không thể xử lý kết quả thanh toán.',
+        });
+    }
+});
+
+module.exports = router;

@@ -9,8 +9,8 @@ dotenv.config();
 const User = require('./models/User');
 const Tour = require('./models/Tour');
 
-// Các model bổ sung cho API category, blog và destination.
-// Tên collection phải khớp với MongoDB Compass.
+// CÃƒÂ¡c model bÃ¡Â»â€¢ sung cho API category, blog vÃƒÂ  destination.
+// TÃƒÂªn collection phÃ¡ÂºÂ£i khÃ¡Â»â€ºp vÃ¡Â»â€ºi MongoDB Compass.
 const looseSchemaOptions = {
     strict: false,
     timestamps: true,
@@ -47,6 +47,41 @@ const Destination =
         new mongoose.Schema({}, looseSchemaOptions),
         'destinations'
     );
+const tourDetailSchema = new mongoose.Schema(
+    {
+        tourId: { type: mongoose.Schema.Types.Mixed, index: true },
+        tour: { type: mongoose.Schema.Types.Mixed },
+        tour_id: { type: mongoose.Schema.Types.Mixed },
+
+        title: { type: String, default: '' },
+        date: { type: Date },
+        startDate: { type: Date },
+        departureDate: { type: Date },
+        tourDate: { type: Date },
+        endDate: { type: Date },
+
+        status: { type: String, default: 'AVAILABLE' },
+        priceAdults: { type: Number, default: 0 },
+        priceChildren: { type: Number, default: 0 },
+        quantity: { type: Number, default: 0 },
+        availableSeats: { type: Number, default: 0 }
+    },
+    {
+        strict: false,
+        timestamps: true
+    }
+);
+
+const TourDetail =
+    mongoose.models.TourDetail ||
+    mongoose.model('TourDetail', tourDetailSchema, 'tourdetails');
+
+
+
+const bookingRoutes = require('./routes/bookings');
+const voucherRoutes = require('./routes/vouchers');
+const wishlistRoutes = require('./routes/wishlist');
+const paymentRoutes = require('./routes/payments');
 
 const app = express();
 
@@ -113,19 +148,203 @@ const publicUser = (user) => ({
     _id: user._id,
     name: user.name || user.username || '',
     username: user.username || user.name || '',
+    firstName: user.firstName || '',
+    lastName: user.lastName || '',
     email: user.email || '',
     phone: user.phone || '',
+    address: user.address || '',
+    gender: user.gender || '',
+    birthday: user.birthday || null,
+    avatar: user.avatar || '',
     role: user.role || 'USER',
 });
+
 
 // ======================================================
 // 3. HEALTH CHECK
 // ======================================================
 
+app.post('/api/users/update-profile', async (req, res) => {
+    try {
+        const token = getTokenFromRequest(req);
+
+        if (!token.startsWith('jwt-token-')) {
+            return res.status(401).json({
+                success: false,
+                message: 'Vui long dang nhap lai.',
+            });
+        }
+
+        const userId = token.slice('jwt-token-'.length);
+
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(401).json({
+                success: false,
+                message: 'Token khong hop le.',
+            });
+        }
+
+        const user = await User.findById(userId);
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'Khong tim thay tai khoan.',
+            });
+        }
+
+        const body = req.body || {};
+        const payload =
+            body.data && typeof body.data === 'object'
+                ? { ...body, ...body.data }
+                : body;
+
+        const has = (key) =>
+            Object.prototype.hasOwnProperty.call(payload, key);
+
+        let changed = false;
+
+        if (has('username')) {
+            const value = String(payload.username || '').trim();
+
+            if (!value) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Username khong duoc de trong.',
+                });
+            }
+
+            user.username = value;
+            changed = true;
+        }
+
+        if (has('firstName')) {
+            user.firstName = String(payload.firstName || '').trim();
+            changed = true;
+        }
+
+        if (has('lastName')) {
+            user.lastName = String(payload.lastName || '').trim();
+            changed = true;
+        }
+
+        if (has('firstName') || has('lastName') || has('fullName')) {
+            const fullName = has('fullName')
+                ? String(payload.fullName || '').trim()
+                : [user.firstName, user.lastName]
+                    .filter(Boolean)
+                    .join(' ')
+                    .trim();
+
+            if (fullName) {
+                user.name = fullName;
+            } else if (!user.name) {
+                user.name = user.username || 'User';
+            }
+
+            changed = true;
+        }
+
+        if (has('email')) {
+            const email = String(payload.email || '').trim().toLowerCase();
+
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Email khong hop le.',
+                });
+            }
+
+            const duplicate = await User.findOne({
+                email,
+                _id: { $ne: user._id },
+            }).lean();
+
+            if (duplicate) {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Email da duoc tai khoan khac su dung.',
+                });
+            }
+
+            user.email = email;
+            changed = true;
+        }
+
+        if (has('phone')) {
+            user.phone = String(payload.phone || '').trim();
+            changed = true;
+        }
+
+        if (has('address')) {
+            user.address = String(payload.address || '').trim();
+            changed = true;
+        }
+
+        if (has('gender')) {
+            user.gender = String(payload.gender || '').trim();
+            changed = true;
+        }
+
+        if (has('birthday')) {
+            const birthday = String(payload.birthday || '').trim();
+
+            if (!birthday) {
+                user.birthday = null;
+            } else {
+                const parsedDate = new Date(birthday);
+
+                if (Number.isNaN(parsedDate.getTime())) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Ngay sinh khong hop le.',
+                    });
+                }
+
+                user.birthday = parsedDate;
+            }
+
+            changed = true;
+        }
+
+        if (!changed) {
+            return res.status(400).json({
+                success: false,
+                message: 'Khong co thong tin nao can cap nhat.',
+            });
+        }
+
+        await user.save();
+
+        const safeUser = publicUser(user);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Cap nhat thong tin thanh cong.',
+            data: safeUser,
+            user: safeUser,
+        });
+    } catch (error) {
+        if (error.code === 11000) {
+            return res.status(409).json({
+                success: false,
+                message: 'Email da duoc su dung.',
+            });
+        }
+
+        console.error('Update profile error:', error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Khong the cap nhat thong tin.',
+        });
+    }
+});
+
 app.get('/', (req, res) => {
     return res.status(200).json({
         success: true,
-        message: 'ROAM Backend API đang hoạt động.',
+        message: 'ROAM Backend API Ä‘ang hoáº¡t Ä‘á»™ng.',
         port: PORT,
         database:
             mongoose.connection.readyState === 1
@@ -147,19 +366,19 @@ app.get('/api/health', (req, res) => {
 
 // ======================================================
 // 4. SEED TOUR SAMPLE
-// Không xóa dữ liệu tour cũ.
+// KhÃƒÂ´ng xÃƒÂ³a dÃ¡Â»Â¯ liÃ¡Â»â€¡u tour cÃ…Â©.
 // ======================================================
 
 app.get('/api/seed-tours', async (req, res) => {
     try {
         const sampleTours = [
             {
-                title: 'Du Lịch Đà Nẵng - Hội An - Bà Nà Hills',
+                title: 'Du Lá»‹ch ÄÃ  Náºµng - Há»™i An - BÃ  NÃ  Hills',
                 description:
-                    'Khám phá Đà Nẵng, Cầu Vàng và Phố cổ Hội An lung linh về đêm.',
+                    'KhÃ¡m phÃ¡ ÄÃ  Náºµng, Cáº§u VÃ ng vÃ  Phá»‘ cá»• Há»™i An lung linh vá» Ä‘Ãªm.',
                 price: 3500000,
-                location: 'Đà Nẵng',
-                duration: '3 Ngày 2 Đêm',
+                location: 'ÄÃ  Náºµng',
+                duration: '3 NgÃ y 2 ÄÃªm',
                 image:
                     'https://images.unsplash.com/photo-1559592413-7cec4d0cae2b?w=500',
                 rating: 4.8,
@@ -168,12 +387,12 @@ app.get('/api/seed-tours', async (req, res) => {
                 region: 'INSIDE',
             },
             {
-                title: 'Khám Phá Đảo Ngọc Phú Quốc',
+                title: 'KhÃ¡m PhÃ¡ Äáº£o Ngá»c PhÃº Quá»‘c',
                 description:
-                    'Trải nghiệm biển xanh, cát trắng và ngắm hoàng hôn Phú Quốc.',
+                    'Tráº£i nghiá»‡m biá»ƒn xanh, cÃ¡t tráº¯ng vÃ  ngáº¯m hoÃ ng hÃ´n PhÃº Quá»‘c.',
                 price: 5200000,
-                location: 'Phú Quốc',
-                duration: '4 Ngày 3 Đêm',
+                location: 'PhÃº Quá»‘c',
+                duration: '4 NgÃ y 3 ÄÃªm',
                 image:
                     'https://images.unsplash.com/photo-1540202404-a2f29016b523?w=500',
                 rating: 4.9,
@@ -182,12 +401,12 @@ app.get('/api/seed-tours', async (req, res) => {
                 region: 'INSIDE',
             },
             {
-                title: 'Sapa - Chinh Phục Đỉnh Fansipan',
+                title: 'Sapa - Chinh Phá»¥c Äá»‰nh Fansipan',
                 description:
-                    'Săn mây Fansipan, tận hưởng không khí trong lành vùng Tây Bắc.',
+                    'SÄƒn mÃ¢y Fansipan, táº­n hÆ°á»Ÿng khÃ´ng khÃ­ trong lÃ nh vÃ¹ng TÃ¢y Báº¯c.',
                 price: 2800000,
                 location: 'Sapa',
-                duration: '2 Ngày 1 Đêm',
+                duration: '2 NgÃ y 1 ÄÃªm',
                 image:
                     'https://images.unsplash.com/photo-1528127269322-539801943592?w=500',
                 rating: 4.7,
@@ -213,16 +432,16 @@ app.get('/api/seed-tours', async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: `Hoàn tất kiểm tra dữ liệu tour mẫu. Đã thêm ${insertedCount} tour mới.`,
+            message: `HoÃƒÂ n tÃ¡ÂºÂ¥t kiÃ¡Â»Æ’m tra dÃ¡Â»Â¯ liÃ¡Â»â€¡u tour mÃ¡ÂºÂ«u. Ã„ÂÃƒÂ£ thÃƒÂªm ${insertedCount} tour mÃ¡Â»â€ºi.`,
             insertedCount,
             totalSamples: sampleTours.length,
         });
     } catch (error) {
-        console.error('Lỗi khởi tạo tour mẫu:', error);
+        console.error('Lá»—i khá»Ÿi táº¡o tour máº«u:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể khởi tạo dữ liệu tour mẫu.',
+            message: 'KhÃ´ng thá»ƒ khá»Ÿi táº¡o dá»¯ liá»‡u tour máº«u.',
         });
     }
 });
@@ -231,7 +450,7 @@ app.get('/api/seed-tours', async (req, res) => {
 // 5. AUTHENTICATION
 // ======================================================
 
-// Đăng ký
+// Ã„ÂÃ„Æ’ng kÃƒÂ½
 app.post('/api/auth/register', async (req, res) => {
     const {
         email,
@@ -245,7 +464,7 @@ app.post('/api/auth/register', async (req, res) => {
     if (!password || (!email && !username && !phone)) {
         return res.status(400).json({
             success: false,
-            message: 'Vui lòng cung cấp đầy đủ thông tin.',
+            message: 'Vui lÃ²ng cung cáº¥p Ä‘áº§y Ä‘á»§ thÃ´ng tin.',
         });
     }
 
@@ -267,7 +486,7 @@ app.post('/api/auth/register', async (req, res) => {
         if (existingUser) {
             return res.status(400).json({
                 success: false,
-                message: 'Tài khoản đã tồn tại.',
+                message: 'TÃ i khoáº£n Ä‘Ã£ tá»“n táº¡i.',
             });
         }
 
@@ -282,13 +501,13 @@ app.post('/api/auth/register', async (req, res) => {
 
         await newUser.save();
 
-        // Token prototype để tương thích frontend hiện tại.
-        // Không phải JWT bảo mật dành cho production.
+        // Token prototype Ã„â€˜Ã¡Â»Æ’ tÃ†Â°Ã†Â¡ng thÃƒÂ­ch frontend hiÃ¡Â»â€¡n tÃ¡ÂºÂ¡i.
+        // KhÃƒÂ´ng phÃ¡ÂºÂ£i JWT bÃ¡ÂºÂ£o mÃ¡ÂºÂ­t dÃƒÂ nh cho production.
         const token = `jwt-token-${newUser._id}`;
 
         return res.status(201).json({
             success: true,
-            message: 'Đăng ký thành công.',
+            message: 'ÄÄƒng kÃ½ thÃ nh cÃ´ng.',
             token,
             user: {
                 id: newUser._id,
@@ -297,16 +516,16 @@ app.post('/api/auth/register', async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('Lỗi đăng ký:', error);
+        console.error('Lá»—i Ä‘Äƒng kÃ½:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Lỗi máy chủ khi đăng ký.',
+            message: 'Lá»—i mÃ¡y chá»§ khi Ä‘Äƒng kÃ½.',
         });
     }
 });
 
-// Đăng nhập
+// Ã„ÂÃ„Æ’ng nhÃ¡ÂºÂ­p
 app.post('/api/auth/login', async (req, res) => {
     const {
         email,
@@ -322,7 +541,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (!loginIdentifier || !password) {
         return res.status(400).json({
             success: false,
-            message: 'Vui lòng nhập tài khoản và mật khẩu.',
+            message: 'Vui lÃ²ng nháº­p tÃ i khoáº£n vÃ  máº­t kháº©u.',
         });
     }
 
@@ -338,7 +557,7 @@ app.post('/api/auth/login', async (req, res) => {
         if (!user) {
             return res.status(401).json({
                 success: false,
-                message: 'Tài khoản hoặc mật khẩu không đúng.',
+                message: 'TÃ i khoáº£n hoáº·c máº­t kháº©u khÃ´ng Ä‘Ãºng.',
             });
         }
 
@@ -350,7 +569,7 @@ app.post('/api/auth/login', async (req, res) => {
         if (!isMatch) {
             return res.status(401).json({
                 success: false,
-                message: 'Tài khoản hoặc mật khẩu không đúng.',
+                message: 'TÃ i khoáº£n hoáº·c máº­t kháº©u khÃ´ng Ä‘Ãºng.',
             });
         }
 
@@ -358,7 +577,7 @@ app.post('/api/auth/login', async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: 'Đăng nhập thành công.',
+            message: 'ÄÄƒng nháº­p thÃ nh cÃ´ng.',
             token,
             user: {
                 id: user._id,
@@ -367,17 +586,17 @@ app.post('/api/auth/login', async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('Lỗi đăng nhập:', error);
+        console.error('Lá»—i Ä‘Äƒng nháº­p:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Lỗi máy chủ khi đăng nhập.',
+            message: 'Lá»—i mÃ¡y chá»§ khi Ä‘Äƒng nháº­p.',
         });
     }
 });
 
-// Xác thực token prototype cho frontend.
-// Lưu ý: cần thay bằng JWT/session thật trước khi triển khai production.
+// XÃƒÂ¡c thÃ¡Â»Â±c token prototype cho frontend.
+// LÃ†Â°u ÃƒÂ½: cÃ¡ÂºÂ§n thay bÃ¡ÂºÂ±ng JWT/session thÃ¡ÂºÂ­t trÃ†Â°Ã¡Â»â€ºc khi triÃ¡Â»Æ’n khai production.
 app.get('/api/auth/authenticate-token', async (req, res) => {
     try {
         const token = getTokenFromRequest(req);
@@ -386,7 +605,7 @@ app.get('/api/auth/authenticate-token', async (req, res) => {
             return res.status(401).json({
                 success: false,
                 authenticated: false,
-                message: 'Token không hợp lệ hoặc đã hết hạn.',
+                message: 'Token khÃ´ng há»£p lá»‡ hoáº·c Ä‘Ã£ háº¿t háº¡n.',
             });
         }
 
@@ -396,7 +615,7 @@ app.get('/api/auth/authenticate-token', async (req, res) => {
             return res.status(401).json({
                 success: false,
                 authenticated: false,
-                message: 'Token không hợp lệ.',
+                message: 'Token khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -406,7 +625,7 @@ app.get('/api/auth/authenticate-token', async (req, res) => {
             return res.status(401).json({
                 success: false,
                 authenticated: false,
-                message: 'Không tìm thấy tài khoản.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y tÃ i khoáº£n.',
             });
         }
 
@@ -421,19 +640,19 @@ app.get('/api/auth/authenticate-token', async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('Lỗi xác thực token:', error);
+        console.error('Lá»—i xÃ¡c thá»±c token:', error);
 
         return res.status(500).json({
             success: false,
             authenticated: false,
-            message: 'Không thể xác thực token.',
+            message: 'KhÃ´ng thá»ƒ xÃ¡c thá»±c token.',
         });
     }
 });
 
 // ======================================================
 // 6. TOUR API
-// Khai báo /all trước /:id để tránh nhầm "all" là ID.
+// Khai bÃƒÂ¡o /all trÃ†Â°Ã¡Â»â€ºc /:id Ã„â€˜Ã¡Â»Æ’ trÃƒÂ¡nh nhÃ¡ÂºÂ§m "all" lÃƒÂ  ID.
 // ======================================================
 
 const getAllTours = async (req, res) => {
@@ -464,7 +683,7 @@ const getAllTours = async (req, res) => {
             if (!Number.isFinite(price)) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Giá tối thiểu không hợp lệ.',
+                    message: 'GiÃ¡ tá»‘i thiá»ƒu khÃ´ng há»£p lá»‡.',
                 });
             }
 
@@ -480,7 +699,7 @@ const getAllTours = async (req, res) => {
             if (!Number.isFinite(price)) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Giá tối đa không hợp lệ.',
+                    message: 'GiÃ¡ tá»‘i Ä‘a khÃ´ng há»£p lá»‡.',
                 });
             }
 
@@ -512,7 +731,7 @@ const getAllTours = async (req, res) => {
             if (start > end) {
                 return res.status(400).json({
                     success: false,
-                    message: 'Ngày bắt đầu phải trước ngày kết thúc.',
+                    message: 'NgÃ y báº¯t Ä‘áº§u pháº£i trÆ°á»›c ngÃ y káº¿t thÃºc.',
                 });
             }
 
@@ -538,11 +757,11 @@ const getAllTours = async (req, res) => {
             total: tours.length,
         });
     } catch (error) {
-        console.error('Lỗi tải danh sách tour:', error);
+        console.error('Lá»—i táº£i danh sÃ¡ch tour:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải danh sách tour.',
+            message: 'KhÃ´ng thá»ƒ táº£i danh sÃ¡ch tour.',
         });
     }
 };
@@ -550,7 +769,7 @@ const getAllTours = async (req, res) => {
 app.get('/api/tours/all', getAllTours);
 app.get('/api/tours', getAllTours);
 
-// Lấy chi tiết tour theo ID
+// LÃ¡ÂºÂ¥y chi tiÃ¡ÂºÂ¿t tour theo ID
 app.get('/api/tours/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -558,7 +777,7 @@ app.get('/api/tours/:id', async (req, res) => {
         if (!isValidObjectId(id)) {
             return res.status(400).json({
                 success: false,
-                message: 'ID tour không hợp lệ.',
+                message: 'ID tour khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -567,7 +786,7 @@ app.get('/api/tours/:id', async (req, res) => {
         if (!tour) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy tour.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y tour.',
             });
         }
 
@@ -576,11 +795,11 @@ app.get('/api/tours/:id', async (req, res) => {
             data: tour,
         });
     } catch (error) {
-        console.error('Lỗi lấy chi tiết tour:', error);
+        console.error('Lá»—i láº¥y chi tiáº¿t tour:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể lấy thông tin tour.',
+            message: 'KhÃ´ng thá»ƒ láº¥y thÃ´ng tin tour.',
         });
     }
 });
@@ -601,11 +820,11 @@ app.get('/api/categories/all', async (req, res) => {
             total: categories.length,
         });
     } catch (error) {
-        console.error('Lỗi tải danh mục:', error);
+        console.error('Lá»—i táº£i danh má»¥c:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải danh mục.',
+            message: 'KhÃ´ng thá»ƒ táº£i danh má»¥c.',
         });
     }
 });
@@ -615,7 +834,7 @@ app.post('/api/categories/create', async (req, res) => {
         if (!req.body || Object.keys(req.body).length === 0) {
             return res.status(400).json({
                 success: false,
-                message: 'Dữ liệu danh mục không được để trống.',
+                message: 'Dá»¯ liá»‡u danh má»¥c khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng.',
             });
         }
 
@@ -626,11 +845,11 @@ app.post('/api/categories/create', async (req, res) => {
             data: category,
         });
     } catch (error) {
-        console.error('Lỗi tạo danh mục:', error);
+        console.error('Lá»—i táº¡o danh má»¥c:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tạo danh mục.',
+            message: 'KhÃ´ng thá»ƒ táº¡o danh má»¥c.',
         });
     }
 });
@@ -642,7 +861,7 @@ app.put('/api/categories/update/:id', async (req, res) => {
         if (!isValidObjectId(id)) {
             return res.status(400).json({
                 success: false,
-                message: 'ID danh mục không hợp lệ.',
+                message: 'ID danh má»¥c khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -655,7 +874,7 @@ app.put('/api/categories/update/:id', async (req, res) => {
         if (!category) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy danh mục.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y danh má»¥c.',
             });
         }
 
@@ -664,11 +883,11 @@ app.put('/api/categories/update/:id', async (req, res) => {
             data: category,
         });
     } catch (error) {
-        console.error('Lỗi cập nhật danh mục:', error);
+        console.error('Lá»—i cáº­p nháº­t danh má»¥c:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể cập nhật danh mục.',
+            message: 'KhÃ´ng thá»ƒ cáº­p nháº­t danh má»¥c.',
         });
     }
 });
@@ -680,7 +899,7 @@ app.delete('/api/categories/delete/:id', async (req, res) => {
         if (!isValidObjectId(id)) {
             return res.status(400).json({
                 success: false,
-                message: 'ID danh mục không hợp lệ.',
+                message: 'ID danh má»¥c khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -689,20 +908,20 @@ app.delete('/api/categories/delete/:id', async (req, res) => {
         if (!category) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy danh mục.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y danh má»¥c.',
             });
         }
 
         return res.status(200).json({
             success: true,
-            message: 'Đã xóa danh mục.',
+            message: 'ÄÃ£ xÃ³a danh má»¥c.',
         });
     } catch (error) {
-        console.error('Lỗi xóa danh mục:', error);
+        console.error('Lá»—i xÃ³a danh má»¥c:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể xóa danh mục.',
+            message: 'KhÃ´ng thá»ƒ xÃ³a danh má»¥c.',
         });
     }
 });
@@ -723,11 +942,11 @@ app.get('/api/admin/blog/all', async (req, res) => {
             total: blogs.length,
         });
     } catch (error) {
-        console.error('Lỗi tải danh sách bài viết:', error);
+        console.error('Lá»—i táº£i danh sÃ¡ch bÃ i viáº¿t:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải danh sách bài viết.',
+            message: 'KhÃ´ng thá»ƒ táº£i danh sÃ¡ch bÃ i viáº¿t.',
         });
     }
 });
@@ -744,11 +963,11 @@ app.get('/api/admin/blog/category/all', async (req, res) => {
             total: categories.length,
         });
     } catch (error) {
-        console.error('Lỗi tải danh mục bài viết:', error);
+        console.error('Lá»—i táº£i danh má»¥c bÃ i viáº¿t:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải danh mục bài viết.',
+            message: 'KhÃ´ng thá»ƒ táº£i danh má»¥c bÃ i viáº¿t.',
         });
     }
 });
@@ -760,7 +979,7 @@ app.get('/api/admin/blog/slug', async (req, res) => {
         if (isMissing(slug)) {
             return res.status(400).json({
                 success: false,
-                message: 'Thiếu slug bài viết.',
+                message: 'Thiáº¿u slug bÃ i viáº¿t.',
             });
         }
 
@@ -771,7 +990,7 @@ app.get('/api/admin/blog/slug', async (req, res) => {
         if (!blog) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy bài viết.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y bÃ i viáº¿t.',
             });
         }
 
@@ -780,18 +999,18 @@ app.get('/api/admin/blog/slug', async (req, res) => {
             data: blog,
         });
     } catch (error) {
-        console.error('Lỗi tải bài viết theo slug:', error);
+        console.error('Lá»—i táº£i bÃ i viáº¿t theo slug:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải bài viết.',
+            message: 'KhÃ´ng thá»ƒ táº£i bÃ i viáº¿t.',
         });
     }
 });
 
 // ======================================================
 // 9. DESTINATION API
-// Khai báo route cụ thể trước route có tham số.
+// Khai bÃƒÂ¡o route cÃ¡Â»Â¥ thÃ¡Â»Æ’ trÃ†Â°Ã¡Â»â€ºc route cÃƒÂ³ tham sÃ¡Â»â€˜.
 // ======================================================
 
 app.get('/api/destinations/top-destinations', async (req, res) => {
@@ -807,11 +1026,11 @@ app.get('/api/destinations/top-destinations', async (req, res) => {
             total: destinations.length,
         });
     } catch (error) {
-        console.error('Lỗi tải điểm đến nổi bật:', error);
+        console.error('Lá»—i táº£i Ä‘iá»ƒm Ä‘áº¿n ná»•i báº­t:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải điểm đến nổi bật.',
+            message: 'KhÃ´ng thá»ƒ táº£i Ä‘iá»ƒm Ä‘áº¿n ná»•i báº­t.',
         });
     }
 });
@@ -828,11 +1047,11 @@ app.get('/api/destinations/all', async (req, res) => {
             total: destinations.length,
         });
     } catch (error) {
-        console.error('Lỗi tải danh sách điểm đến:', error);
+        console.error('Lá»—i táº£i danh sÃ¡ch Ä‘iá»ƒm Ä‘áº¿n:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải danh sách điểm đến.',
+            message: 'KhÃ´ng thá»ƒ táº£i danh sÃ¡ch Ä‘iá»ƒm Ä‘áº¿n.',
         });
     }
 });
@@ -844,7 +1063,7 @@ app.get('/api/destinations/:id', async (req, res) => {
         if (!isValidObjectId(id)) {
             return res.status(400).json({
                 success: false,
-                message: 'ID điểm đến không hợp lệ.',
+                message: 'ID Ä‘iá»ƒm Ä‘áº¿n khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -853,7 +1072,7 @@ app.get('/api/destinations/:id', async (req, res) => {
         if (!destination) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy điểm đến.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y Ä‘iá»ƒm Ä‘áº¿n.',
             });
         }
 
@@ -862,11 +1081,11 @@ app.get('/api/destinations/:id', async (req, res) => {
             data: destination,
         });
     } catch (error) {
-        console.error('Lỗi tải điểm đến:', error);
+        console.error('Lá»—i táº£i Ä‘iá»ƒm Ä‘áº¿n:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tải điểm đến.',
+            message: 'KhÃ´ng thá»ƒ táº£i Ä‘iá»ƒm Ä‘áº¿n.',
         });
     }
 });
@@ -876,7 +1095,7 @@ app.post('/api/destinations/create', async (req, res) => {
         if (!req.body || Object.keys(req.body).length === 0) {
             return res.status(400).json({
                 success: false,
-                message: 'Dữ liệu điểm đến không được để trống.',
+                message: 'Dá»¯ liá»‡u Ä‘iá»ƒm Ä‘áº¿n khÃ´ng Ä‘Æ°á»£c Ä‘á»ƒ trá»‘ng.',
             });
         }
 
@@ -887,11 +1106,11 @@ app.post('/api/destinations/create', async (req, res) => {
             data: destination,
         });
     } catch (error) {
-        console.error('Lỗi tạo điểm đến:', error);
+        console.error('Lá»—i táº¡o Ä‘iá»ƒm Ä‘áº¿n:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể tạo điểm đến.',
+            message: 'KhÃ´ng thá»ƒ táº¡o Ä‘iá»ƒm Ä‘áº¿n.',
         });
     }
 });
@@ -903,7 +1122,7 @@ app.put('/api/destinations/update/:id', async (req, res) => {
         if (!isValidObjectId(id)) {
             return res.status(400).json({
                 success: false,
-                message: 'ID điểm đến không hợp lệ.',
+                message: 'ID Ä‘iá»ƒm Ä‘áº¿n khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -916,7 +1135,7 @@ app.put('/api/destinations/update/:id', async (req, res) => {
         if (!destination) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy điểm đến.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y Ä‘iá»ƒm Ä‘áº¿n.',
             });
         }
 
@@ -925,11 +1144,11 @@ app.put('/api/destinations/update/:id', async (req, res) => {
             data: destination,
         });
     } catch (error) {
-        console.error('Lỗi cập nhật điểm đến:', error);
+        console.error('Lá»—i cáº­p nháº­t Ä‘iá»ƒm Ä‘áº¿n:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể cập nhật điểm đến.',
+            message: 'KhÃ´ng thá»ƒ cáº­p nháº­t Ä‘iá»ƒm Ä‘áº¿n.',
         });
     }
 });
@@ -941,7 +1160,7 @@ app.delete('/api/destinations/delete/:id', async (req, res) => {
         if (!isValidObjectId(id)) {
             return res.status(400).json({
                 success: false,
-                message: 'ID điểm đến không hợp lệ.',
+                message: 'ID Ä‘iá»ƒm Ä‘áº¿n khÃ´ng há»£p lá»‡.',
             });
         }
 
@@ -950,52 +1169,421 @@ app.delete('/api/destinations/delete/:id', async (req, res) => {
         if (!destination) {
             return res.status(404).json({
                 success: false,
-                message: 'Không tìm thấy điểm đến.',
+                message: 'KhÃ´ng tÃ¬m tháº¥y Ä‘iá»ƒm Ä‘áº¿n.',
             });
         }
 
         return res.status(200).json({
             success: true,
-            message: 'Đã xóa điểm đến.',
+            message: 'ÄÃ£ xÃ³a Ä‘iá»ƒm Ä‘áº¿n.',
         });
     } catch (error) {
-        console.error('Lỗi xóa điểm đến:', error);
+        console.error('Lá»—i xÃ³a Ä‘iá»ƒm Ä‘áº¿n:', error);
 
         return res.status(500).json({
             success: false,
-            message: 'Không thể xóa điểm đến.',
+            message: 'KhÃ´ng thá»ƒ xÃ³a Ä‘iá»ƒm Ä‘áº¿n.',
         });
     }
 });
 
 // ======================================================
-// 10. FALLBACK CHO API KHÔNG TỒN TẠI
-// ======================================================
 
-app.use('/api', (req, res) => {
-    return res.status(404).json({
-        success: false,
-        message: `Không tìm thấy API: ${req.method} ${req.originalUrl}`,
-    });
+/* ======================================================
+   TOUR DETAILS / LÃ¡Â»Å CH KHÃ¡Â»Å¾I HÃƒâ‚¬NH
+   Ã„ÂÃ¡ÂºÂ·t phÃ¡ÂºÂ§n nÃƒÂ y TRÃ†Â¯Ã¡Â»Å¡C app.use('/api', fallback)
+====================================================== */
+
+const getTourDetailTourFilter = (tourId) => {
+    const id = String(tourId || '').trim();
+    const values = [id];
+
+    if (mongoose.Types.ObjectId.isValid(id)) {
+        values.push(new mongoose.Types.ObjectId(id));
+    }
+
+    return {
+        $or: [
+            { tourId: { $in: values } },
+            { tour: { $in: values } },
+            { tour_id: { $in: values } },
+            { 'tour._id': { $in: values } },
+            { 'tour.id': { $in: values } }
+        ]
+    };
+};
+
+const getTourDetailDate = (item) => {
+    const value =
+        item.startDate ||
+        item.departureDate ||
+        item.date ||
+        item.tourDate;
+
+    if (!value) return null;
+
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const isTourDetailAvailable = (item) => {
+    const status = String(item.status || 'AVAILABLE').toUpperCase();
+
+    return ![
+        'CANCELLED',
+        'CANCELED',
+        'INACTIVE',
+        'DELETED'
+    ].includes(status);
+};
+
+// GET /api/tour-details/all
+app.get('/api/tour-details/all', async (req, res) => {
+    try {
+        const data = await TourDetail.find()
+            .sort({ startDate: 1, date: 1, createdAt: -1 })
+            .lean();
+
+        return res.status(200).json({
+            success: true,
+            data,
+            total: data.length
+        });
+    } catch (error) {
+        console.error('Lá»—i láº¥y danh sÃ¡ch lá»‹ch tour:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ láº¥y danh sÃ¡ch lá»‹ch tour.'
+        });
+    }
 });
 
+// GET /api/tour-details/tour/:tourId
+app.get('/api/tour-details/tour/:tourId', async (req, res) => {
+    try {
+        const { tourId } = req.params;
+
+        if (!tourId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Thiáº¿u tourId.'
+            });
+        }
+
+        const data = await TourDetail.find(
+            getTourDetailTourFilter(tourId)
+        )
+            .sort({ startDate: 1, date: 1 })
+            .lean();
+
+        return res.status(200).json({
+            success: true,
+            data,
+            total: data.length
+        });
+    } catch (error) {
+        console.error('Lá»—i láº¥y lá»‹ch theo tour:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ láº¥y lá»‹ch theo tour.'
+        });
+    }
+});
+
+// GET /api/tour-details/month/:id
+// TrÃ¡ÂºÂ£ vÃ¡Â»Â cÃƒÂ¡c thÃƒÂ¡ng vÃƒÂ  ngÃƒÂ y khÃ¡Â»Å¸i hÃƒÂ nh hiÃ¡Â»â€¡n cÃƒÂ³ cÃ¡Â»Â§a mÃ¡Â»â„¢t tour.
+app.get('/api/tour-details/month/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const records = await TourDetail.find(
+            getTourDetailTourFilter(id)
+        ).lean();
+
+        const grouped = new Map();
+
+        records.forEach((item) => {
+            if (!isTourDetailAvailable(item)) return;
+
+            const date = getTourDetailDate(item);
+            if (!date) return;
+
+            const month = [
+                date.getFullYear(),
+                String(date.getMonth() + 1).padStart(2, '0')
+            ].join('-');
+
+            const dateString = [
+                date.getFullYear(),
+                String(date.getMonth() + 1).padStart(2, '0'),
+                String(date.getDate()).padStart(2, '0')
+            ].join('-');
+
+            if (!grouped.has(month)) {
+                grouped.set(month, new Set());
+            }
+
+            grouped.get(month).add(dateString);
+        });
+
+        const data = Array.from(grouped.entries())
+            .map(([month, dateSet]) => ({
+                month,
+                dates: Array.from(dateSet).sort()
+            }))
+            .sort((a, b) => a.month.localeCompare(b.month));
+
+        const availableDates = data.flatMap((item) => item.dates);
+
+        return res.status(200).json({
+            success: true,
+            data,
+            months: data,
+            availableDates,
+            total: data.length
+        });
+    } catch (error) {
+        console.error('Lá»—i láº¥y lá»‹ch theo thÃ¡ng:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ láº¥y lá»‹ch theo thÃ¡ng.'
+        });
+    }
+});
+
+// GET /api/tour-details/day?tourId=...&months=YYYY-MM
+app.get('/api/tour-details/day', async (req, res) => {
+    try {
+        const { tourId } = req.query;
+        const monthValue = String(
+            req.query.months || req.query.month || ''
+        ).trim();
+
+        if (!tourId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Thiáº¿u tourId.'
+            });
+        }
+
+        let year = null;
+        let month = null;
+
+        // HÃ¡Â»â€” trÃ¡Â»Â£ Ã„â€˜Ã¡Â»â€¹nh dÃ¡ÂºÂ¡ng YYYY-MM.
+        const match = monthValue.match(/^(\d{4})-(\d{1,2})$/);
+
+        if (match) {
+            year = Number(match[1]);
+            month = Number(match[2]);
+
+            if (month < 1 || month > 12) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'ThÃ¡ng khÃ´ng há»£p lá»‡. DÃ¹ng Ä‘á»‹nh dáº¡ng YYYY-MM.'
+                });
+            }
+        }
+
+        const records = await TourDetail.find(
+            getTourDetailTourFilter(tourId)
+        ).lean();
+
+        const data = records
+            .filter((item) => {
+                if (!isTourDetailAvailable(item)) return false;
+
+                const date = getTourDetailDate(item);
+                if (!date) return false;
+
+                if (year !== null && month !== null) {
+                    return (
+                        date.getFullYear() === year &&
+                        date.getMonth() + 1 === month
+                    );
+                }
+
+                return true;
+            })
+            .sort((a, b) => {
+                const dateA = getTourDetailDate(a);
+                const dateB = getTourDetailDate(b);
+
+                return (dateA?.getTime() || 0) -
+                    (dateB?.getTime() || 0);
+            });
+
+        return res.status(200).json({
+            success: true,
+            data,
+            total: data.length
+        });
+    } catch (error) {
+        console.error('Lá»—i láº¥y lá»‹ch theo ngÃ y:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ láº¥y lá»‹ch theo ngÃ y.'
+        });
+    }
+});
+
+// GET /api/tour-details/:id
+// Ã„ÂÃ¡ÂºÂ·t route nÃƒÂ y sau /all, /tour, /month vÃƒÂ  /day.
+app.get('/api/tour-details/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'ID lá»‹ch tour khÃ´ng há»£p lá»‡.'
+            });
+        }
+
+        const data = await TourDetail.findById(id).lean();
+
+        if (!data) {
+            return res.status(404).json({
+                success: false,
+                message: 'KhÃ´ng tÃ¬m tháº¥y lá»‹ch tour.'
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            data
+        });
+    } catch (error) {
+        console.error('Lá»—i láº¥y chi tiáº¿t lá»‹ch tour:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ láº¥y chi tiáº¿t lá»‹ch tour.'
+        });
+    }
+});
+
+// POST /api/tour-details/add
+app.post('/api/tour-details/add', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const rawTourId = body.tourId || body.tour_id || body.tour;
+        const tourId =
+            rawTourId && typeof rawTourId === 'object'
+                ? (rawTourId._id || rawTourId.id)
+                : rawTourId;
+
+        if (!tourId || !mongoose.Types.ObjectId.isValid(String(tourId))) {
+            return res.status(400).json({
+                success: false,
+                message: 'Cáº§n cung cáº¥p tourId há»£p lá»‡.'
+            });
+        }
+
+        const tourExists = await Tour.findById(String(tourId)).lean();
+
+        if (!tourExists) {
+            return res.status(404).json({
+                success: false,
+                message: 'KhÃ´ng tÃ¬m tháº¥y tour tÆ°Æ¡ng á»©ng.'
+            });
+        }
+
+        const newDetail = new TourDetail({
+            ...body,
+            tourId: String(tourId),
+            status: body.status || 'AVAILABLE'
+        });
+
+        const saved = await newDetail.save();
+
+        return res.status(201).json({
+            success: true,
+            message: 'ÄÃ£ táº¡o lá»‹ch tour.',
+            data: saved
+        });
+    } catch (error) {
+        console.error('Lá»—i táº¡o lá»‹ch tour:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ táº¡o lá»‹ch tour.'
+        });
+    }
+});
+
+// POST /api/tour-details/update/:id
+app.post('/api/tour-details/update/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'ID lá»‹ch tour khÃ´ng há»£p lá»‡.'
+            });
+        }
+
+        const body = { ...(req.body || {}) };
+        delete body._id;
+        delete body.__v;
+        delete body.createdAt;
+
+        const data = await TourDetail.findByIdAndUpdate(
+            id,
+            { $set: body },
+            { new: true, runValidators: true }
+        );
+
+        if (!data) {
+            return res.status(404).json({
+                success: false,
+                message: 'KhÃ´ng tÃ¬m tháº¥y lá»‹ch tour Ä‘á»ƒ cáº­p nháº­t.'
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'ÄÃ£ cáº­p nháº­t lá»‹ch tour.',
+            data
+        });
+    } catch (error) {
+        console.error('Lá»—i cáº­p nháº­t lá»‹ch tour:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'KhÃ´ng thá»ƒ cáº­p nháº­t lá»‹ch tour.'
+        });
+    }
+});
 // ======================================================
-// 11. KHỞI ĐỘNG SERVER SAU KHI KẾT NỐI MONGODB
+// 11. KHÃ¡Â»Å¾I Ã„ÂÃ¡Â»ËœNG SERVER SAU KHI KÃ¡ÂºÂ¾T NÃ¡Â»ÂI MONGODB
 // ======================================================
+
+app.use('/api/bookings', bookingRoutes);
+
+app.use('/api/payments', paymentRoutes);
+
+app.use('/api/wishlist', wishlistRoutes);
+
+app.use('/api/admin/voucher', voucherRoutes);
 
 const startServer = async () => {
     try {
         if (!MONGO_URI) {
             throw new Error(
-                'Thiếu MONGO_URI. Hãy kiểm tra file .env trong pacific-backend.'
+                'Thiáº¿u MONGO_URI. HÃ£y kiá»ƒm tra file .env trong pacific-backend.'
             );
         }
 
         await mongoose.connect(MONGO_URI);
 
-        console.log('✅ Đã kết nối thành công tới Database MongoDB!');
+        console.log('âœ… ÄÃ£ káº¿t ná»‘i thÃ nh cÃ´ng tá»›i Database MongoDB!');
 
-        // Bổ sung trường mặc định cho tour cũ nếu đang thiếu.
+        // BÃ¡Â»â€¢ sung trÃ†Â°Ã¡Â»Âng mÃ¡ÂºÂ·c Ã„â€˜Ã¡Â»â€¹nh cho tour cÃ…Â© nÃ¡ÂºÂ¿u Ã„â€˜ang thiÃ¡ÂºÂ¿u.
         await Tour.updateMany(
             { status: { $exists: false } },
             { $set: { status: 'PUBLISHED' } }
@@ -1006,16 +1594,16 @@ const startServer = async () => {
             { $set: { region: 'INSIDE' } }
         );
 
-        console.log('✅ Đã kiểm tra trường status và region của tour.');
+        console.log('âœ… ÄÃ£ kiá»ƒm tra trÆ°á»ng status vÃ  region cá»§a tour.');
 
         app.listen(PORT, () => {
             console.log(
-                `🚀 ROAM Backend đang chạy tại http://localhost:${PORT}`
+                `Ã°Å¸Å¡â‚¬ ROAM Backend Ã„â€˜ang chÃ¡ÂºÂ¡y tÃ¡ÂºÂ¡i http://localhost:${PORT}`
             );
         });
     } catch (error) {
         console.error(
-            '❌ Không thể khởi động backend:',
+            'âŒ KhÃ´ng thá»ƒ khá»Ÿi Ä‘á»™ng backend:',
             error.message
         );
 
@@ -1024,3 +1612,8 @@ const startServer = async () => {
 };
 
 startServer();
+
+
+
+
+
